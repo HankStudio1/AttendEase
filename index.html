@@ -1737,11 +1737,8 @@ function syncAll(){
 
 // ── CALCULATOR / BUNK CLASS ───────────────────────────
 function resetCalc() {
-    // FIX: Wipe the corrupted runaway data from the database first
-    S.globalManualAtt = { held: 0, att: 0 };
-    saveState(); 
-    
-    // Now get the true, clean overall attendance
+    // FIX: Removed the "data wipe". It now correctly syncs the UI 
+    // back to your real saved numbers if you mess up while clicking.
     const ov = getOverall();
     calcVals.total = ov.held;
     calcVals.att = ov.att;
@@ -1749,7 +1746,7 @@ function resetCalc() {
     document.getElementById('c-total').textContent = calcVals.total;
     document.getElementById('c-att').textContent = calcVals.att;
     updateCalcResult();
-    toast('Corrupted data cleared! Reset to true attendance.');
+    toast('Restored to saved data ✓');
 }
 
 function renderCalc(){
@@ -1861,12 +1858,11 @@ function saveCalcSnapshot() {
       rawA += st.att;
   });
   
-  // FIX: Removed the buggy subtraction block here. 
-  // rawH and rawA already represent your true base stats.
-  
+  // FIX: Removed Math.max(0, ...) so the app can save negative 
+  // adjustments when you press the minus (-) button.
   S.globalManualAtt = { 
-    held: Math.max(0, calcVals.total - rawH), 
-    att: Math.max(0, calcVals.att - rawA) 
+    held: calcVals.total - rawH, 
+    att: calcVals.att - rawA 
   };
   
   saveState();
