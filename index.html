@@ -1800,12 +1800,15 @@ function updateCalcResult(){
   const sk = canSkip(att, total, calcTarget);
   const avg = getAvgClassesPerDay();
   const dayBunk = Math.floor(sk / avg);
+  
+  // Convert classes needed into days
+  const mustAttendDays = Math.ceil(need / avg);
 
   document.getElementById('r-cur').textContent=cur+'%';
   document.getElementById('r-skip').textContent=dayBunk + ' Days';
   
-  // FIX: Added ' Classes' so it's not just a floating zero
-  document.getElementById('r-need').textContent=need + ' Classes';
+  // Show must-attend as days (e.g., "2 Days") instead of classes
+  document.getElementById('r-need').textContent=mustAttendDays + ' Days';
   
   document.getElementById('r-max').textContent=maxP+'%';
   // FIX: Removed the confusing class count, leaving only the "Full Day" count
@@ -3467,3 +3470,4 @@ function getSemesterForecast(){
 }
 </script>
 </body></html>
+
