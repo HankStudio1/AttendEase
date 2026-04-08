@@ -1177,6 +1177,7 @@ function loadFromCloud(){
   db.collection('users').doc(currentUser.uid).get().then(doc=>{
     if(doc.exists){
       S = doc.data();
+      calcTarget = S.profile.target || 75;
       saveState();
       renderAll();
       toast('Data loaded from cloud ✓');
@@ -1622,37 +1623,31 @@ function savePrevAtt() {
   const toDate = document.getElementById('prev-to-date').value;
   if(!fromDate || !toDate) { toast('Select date range'); return; }
 
-  const start = new Date(fromDate);
-  const end = new Date(toDate);
-  
+  if(!S.manualAtt) S.manualAtt = {};
+
   S.subjects.forEach(s => {
     const targetHeld = parseInt(document.getElementById(`prev-held-${s.id}`).value) || 0;
     const targetAtt = parseInt(document.getElementById(`prev-att-${s.id}`).value) || 0;
     
-    let currentHeld = 0;
-    let datesInRange = [];
-    
-    // 1. Find valid dates in range (excluding weekends if preferred)
-    for(let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-       const dow = d.getDay();
-       const sched = (S.timetable[dow] || []).find(c => c.subjId === s.id);
-       if(sched) datesInRange.push(dk(d));
+    // Count naturally recorded classes so we don't double count
+    let naturalHeld = 0, naturalAtt = 0;
+    for (const [k, r] of Object.entries(S.attendance)) {
+      if (r && r[s.id] !== undefined && k.indexOf('_') !== 0) {
+        if (r[s.id] !== 'skip') naturalHeld++;
+        if (r[s.id] === 'present') naturalAtt++;
+      }
     }
 
-    // 2. Fill attendance records to match the "Held" and "Attended" inputs
-    for(let i = 0; i < targetHeld; i++) {
-      const dateKey = datesInRange[i % datesInRange.length] || dk(end);
-      if(!S.attendance[dateKey]) S.attendance[dateKey] = {};
-      
-      // Distribute "Present" marks until we hit targetAtt
-      S.attendance[dateKey][s.id] = (currentHeld < targetAtt) ? 'present' : 'absent';
-      currentHeld++;
-    }
+    // Set the offset difference so the Stats perfectly match the user's input
+    S.manualAtt[s.id] = { 
+      held: Math.max(0, targetHeld - naturalHeld), 
+      att: Math.max(0, targetAtt - naturalAtt) 
+    };
   });
 
   saveState();
   syncAll();
-  toast('Range Attendance Synced to Graph ✓');
+  toast('Total Attendance Synced ✓');
   document.getElementById('prev-att-panel').style.display = 'none';
 }
 
@@ -1742,13 +1737,19 @@ function syncAll(){
 
 // ── CALCULATOR / BUNK CLASS ───────────────────────────
 function resetCalc() {
+    // FIX: Wipe the corrupted runaway data from the database first
+    S.globalManualAtt = { held: 0, att: 0 };
+    saveState(); 
+    
+    // Now get the true, clean overall attendance
     const ov = getOverall();
     calcVals.total = ov.held;
     calcVals.att = ov.att;
+    
     document.getElementById('c-total').textContent = calcVals.total;
     document.getElementById('c-att').textContent = calcVals.att;
     updateCalcResult();
-    toast('Reset to current attendance data');
+    toast('Corrupted data cleared! Reset to true attendance.');
 }
 
 function renderCalc(){
@@ -1860,85 +1861,17 @@ function saveCalcSnapshot() {
       rawA += st.att;
   });
   
-  if (S.globalManualAtt) {
-      rawH -= S.globalManualAtt.held;
-      rawA -= S.globalManualAtt.att;
-  }
+  // FIX: Removed the buggy subtraction block here. 
+  // rawH and rawA already represent your true base stats.
   
-  S.globalManualAtt = { held: Math.max(0, calcVals.total - rawH), att: Math.max(0, calcVals.att - rawA) };
+  S.globalManualAtt = { 
+    held: Math.max(0, calcVals.total - rawH), 
+    att: Math.max(0, calcVals.att - rawA) 
+  };
+  
   saveState();
   syncAll();
   toast('Saved! Dashboard updated ✓');
-}
-
-function renderBunkByDay() {
-  const container = document.getElementById('bunk-by-day-list');
-  if(!container) return;
-  let html = '';
-  const target = calcTarget;
-  const ov = getOverall(); // NEW: Get current overall percentage
-  
-  [1, 2, 3, 4, 5].forEach(day => {
-    const classes = (S.timetable[day] || []).filter(c => !BREAK_IDS.includes(c.subjId));
-    if (classes.length === 0) return; 
-    
-    let periodsSafeToSkip = 0;
-    let riskSubjects = [];
-    
-    for (let i = 0; i < classes.length; i++) {
-      let currentPeriodIsSafe = true;
-      for (let j = 0; j <= i; j++) {
-        const cls = classes[j];
-        const st = getSubjStats(cls.subjId);
-        const simPct = Math.round((st.att / (st.held + 1)) * 100);
-        if (simPct < target) {
-          currentPeriodIsSafe = false;
-          const sName = gs(cls.subjId) ? gs(cls.subjId).name.split(' ')[0] : cls.subjId;
-          if (!riskSubjects.includes(sName)) riskSubjects.push(sName);
-        }
-      }
-      if (currentPeriodIsSafe) periodsSafeToSkip = i + 1;
-      else break; // Stop checking further periods
-    }
-
-    // NEW: Calculate the Overall Impact of skipping this full day
-    const dayDropPct = Math.round((ov.att / (ov.held + classes.length)) * 100);
-    
-    // Choose color for the impact text based on whether it drops below target
-    const impactColor = dayDropPct >= target ? 'var(--text3)' : 'var(--red)';
-    let impactText = `<div style="font-size:10px; font-weight:700; color:${impactColor}; margin-bottom:5px;">Overall: ${ov.pct}% → ${dayDropPct}%</div>`;
-
-    let badge = '';
-    
-    // YOUR NEW 3-STAGE UX LOGIC:
-    if (periodsSafeToSkip === classes.length) {
-      // 1. FULL DAY SKIP
-      badge = `<span style="background:rgba(0,200,83,.12);color:var(--green);padding:5px 9px;border-radius:8px;font-size:10px;font-weight:800;">✓ Full Day Skip</span>`;
-      
-    } else if (periodsSafeToSkip >= classes.length - 1 && periodsSafeToSkip > 0) {
-      // 2. PARTIAL (Only if they can skip ALMOST the whole day, e.g., 3 out of 4)
-      badge = `<span style="background:rgba(255,171,0,.12);color:var(--yellow);padding:5px 9px;border-radius:8px;font-size:10px;font-weight:800;">⚠ Skip first ${periodsSafeToSkip} only</span>`;
-      
-    } else {
-      // 3. DANGER / MUST ATTEND (If they can only skip 1 or 2, just tell them to attend)
-      // .slice(0, 2) ensures the badge doesn't get too wide if 4 subjects are dropping
-      badge = `<span style="background:rgba(255,23,68,.12);color:var(--red);padding:5px 9px;border-radius:8px;font-size:10px;font-weight:800;">✗ Must Attend (Drops ${riskSubjects.slice(0, 2).join(', ')})</span>`;
-    }
-      
-    html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
-      <div>
-        <div style="font-size:13px;font-weight:800;color:var(--text);">${DAY_NAMES[day]}</div>
-        <div style="font-size:10px;color:var(--text3);margin-top:4px;">${classes.length} Classes scheduled</div>
-      </div>
-      <div style="text-align:right;">
-        ${impactText}
-        ${badge}
-      </div>
-    </div>`;
-  });
-  
-  if(html === '') html = `<div style="text-align:center;padding:16px;color:var(--text3);font-size:12px;background:var(--card);border-radius:12px;border:1px solid var(--border);">No active classes in schedule.</div>`;
-  container.innerHTML = html;
 }
 
 function renderDetail(sid){
