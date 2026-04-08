@@ -1597,7 +1597,13 @@ function togglePrevAttPanel() {
 function renderPrevAttList() {
   const list = document.getElementById('prev-att-list');
   let html = '';
-  S.subjects.forEach(s => {
+  
+  // NEW: Filter out "Ghost" subjects (only show subjects in timetable or with past data)
+  const activeIds = new Set();
+  [0,1,2,3,4,5,6].forEach(d => (S.timetable[d]||[]).forEach(c => activeIds.add(c.subjId)));
+  const activeSubjects = S.subjects.filter(s => activeIds.has(s.id) || getSubjStats(s.id).held > 0);
+
+  activeSubjects.forEach(s => {
     const st = getSubjStats(s.id);
     const c = gcol(s.color), bg = gbg(s.color);
     html += `<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);">
@@ -1626,10 +1632,15 @@ function savePrevAtt() {
   if(!S.manualAtt) S.manualAtt = {};
 
   S.subjects.forEach(s => {
-    const targetHeld = parseInt(document.getElementById(`prev-held-${s.id}`).value) || 0;
-    const targetAtt = parseInt(document.getElementById(`prev-att-${s.id}`).value) || 0;
+    const heldEl = document.getElementById(`prev-held-${s.id}`);
+    const attEl = document.getElementById(`prev-att-${s.id}`);
     
-    // Count naturally recorded classes so we don't double count
+    // NEW: Skip ghost subjects that aren't rendered in the UI
+    if(!heldEl || !attEl) return; 
+
+    const targetHeld = parseInt(heldEl.value) || 0;
+    const targetAtt = parseInt(attEl.value) || 0;
+    
     let naturalHeld = 0, naturalAtt = 0;
     for (const [k, r] of Object.entries(S.attendance)) {
       if (r && r[s.id] !== undefined && k.indexOf('_') !== 0) {
@@ -1638,7 +1649,6 @@ function savePrevAtt() {
       }
     }
 
-    // Set the offset difference so the Stats perfectly match the user's input
     S.manualAtt[s.id] = { 
       held: Math.max(0, targetHeld - naturalHeld), 
       att: Math.max(0, targetAtt - naturalAtt) 
@@ -1793,7 +1803,10 @@ function updateCalcResult(){
 
   document.getElementById('r-cur').textContent=cur+'%';
   document.getElementById('r-skip').textContent=dayBunk + ' Days';
-  document.getElementById('r-need').textContent=need;
+  
+  // FIX: Added ' Classes' so it's not just a floating zero
+  document.getElementById('r-need').textContent=need + ' Classes';
+  
   document.getElementById('r-max').textContent=maxP+'%';
   // FIX: Removed the confusing class count, leaving only the "Full Day" count
   document.getElementById('calc-sum').innerHTML=need>0
@@ -2376,10 +2389,15 @@ function openLeaveDetail(id){
 function renderReports(){
   const ov=getOverall(),t=new Date();
   document.getElementById('rpt-summary').innerHTML=`<div class="rptr"><span class="rptl">Period</span><span class="rptv">${MON_SHORT[0]}–${MON_SHORT[t.getMonth()]} ${t.getFullYear()}</span></div><div class="rptr"><span class="rptl">Total Held</span><span class="rptv">${ov.held}</span></div><div class="rptr"><span class="rptl">Attended</span><span class="rptv">${ov.att}</span></div><div class="rptr"><span class="rptl">Missed</span><span class="rptv">${ov.held-ov.att}</span></div><div class="rptr"><span class="rptl">Overall %</span><span class="rptv" style="font-size:17px;color:${pctCol(ov.pct,S.profile.target)}">${ov.pct}%</span></div>`;
+  
+  const activeIds = new Set();
+  [0,1,2,3,4,5,6].forEach(d => (S.timetable[d]||[]).forEach(c => activeIds.add(c.subjId)));
+  const activeSubjects = S.subjects.filter(s => activeIds.has(s.id) || getSubjStats(s.id).held > 0);
+
   let h=`<div style="padding:12px 13px;font-weight:700;font-size:12px;color:var(--text3);border-bottom:1px solid var(--border);">Subject Breakdown</div>`;
-  S.subjects.forEach((s,i)=>{
+  activeSubjects.forEach((s,i)=>{
     const st=getSubjStats(s.id),col=pctCol(st.pct,S.profile.target);
-    h+=`<div style="display:flex;align-items:center;justify-content:space-between;padding:11px 13px;${i<S.subjects.length-1?'border-bottom:1px solid var(--border);':''}"><div><div style="font-size:13px;font-weight:600;color:var(--text)">${s.name}</div><div style="font-size:10px;color:var(--text3);font-family:var(--mono);margin-top:2px">${st.att}/${st.held}</div></div><div style="font-size:15px;font-weight:800;color:${col};font-family:var(--mono)">${st.pct}%</div></div>`;
+    h+=`<div style="display:flex;align-items:center;justify-content:space-between;padding:11px 13px;${i<activeSubjects.length-1?'border-bottom:1px solid var(--border);':''}"><div><div style="font-size:13px;font-weight:600;color:var(--text)">${s.name}</div><div style="font-size:10px;color:var(--text3);font-family:var(--mono);margin-top:2px">${st.att}/${st.held}</div></div><div style="font-size:15px;font-weight:800;color:${col};font-family:var(--mono)">${st.pct}%</div></div>`;
   });
   document.getElementById('rpt-subjects').innerHTML=h;
   drawSubjectComparison();
@@ -2405,8 +2423,12 @@ function drawSubjectComparison() {
   const container = document.getElementById('rpt-subjects');
   if(!container) return;
   
+  const activeIds = new Set();
+  [0,1,2,3,4,5,6].forEach(d => (S.timetable[d]||[]).forEach(c => activeIds.add(c.subjId)));
+  const activeSubjects = S.subjects.filter(s => activeIds.has(s.id) || getSubjStats(s.id).held > 0);
+
   // Sort subjects by percentage (lowest to highest) to show risk
-  const sorted = [...S.subjects].sort((a,b) => getSubjStats(a.id).pct - getSubjStats(b.id).pct);
+  const sorted = [...activeSubjects].sort((a,b) => getSubjStats(a.id).pct - getSubjStats(b.id).pct);
   
   let html = `<div style="padding:12px 13px; font-weight:700; font-size:12px; color:var(--text3); border-bottom:1px solid var(--border);">Performance Ranking</div>`;
   
