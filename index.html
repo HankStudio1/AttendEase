@@ -77,7 +77,9 @@ body{
 .hdr-right{display:flex;gap:8px;}
 .header-icon{width:36px;height:36px;border-radius:12px;background:var(--card2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;position:relative;flex-shrink:0;}
 .header-icon svg{width:17px;height:17px;stroke:var(--text2);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;}
-.ndot{position:absolute;top:7px;right:7px;width:7px;height:7px;background:var(--red);border-radius:50%;border:2px solid var(--card2);}
+.ndot{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;background:var(--red);border-radius:50%;border:2px solid var(--bg);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:800;color:#fff;padding:0 3px;}
+@keyframes ndotpulse{0%,100%{transform:scale(1);}50%{transform:scale(1.25);}}
+.ndot.pulse{animation:ndotpulse .7s ease 3;}
 
 /* ═══ BOTTOM NAV ═══ */
 .bnav{
@@ -1134,9 +1136,16 @@ try {
   db = firebase.firestore();
 
   auth.onAuthStateChanged(user=>{
+    const wasSignedOut = !currentUser;
     currentUser = user;
     const el = document.getElementById('cloud-status');
     if(el) el.textContent = user ? '☁ ' + user.displayName : 'Not signed in';
+    // FIX 1: If user just signed in (was signed out before), load their cloud data
+    if(user && wasSignedOut && S){
+      toast('Loading your data from cloud...');
+      loadFromCloud();
+    }
+    renderSettings();
   });
 } catch(e) {
   console.warn('Firebase not available:', e.message);
@@ -1198,7 +1207,10 @@ function loadState(){
   const s={profile:{...DEFAULT_PROFILE},subjects:JSON.parse(JSON.stringify(DEFAULT_SUBJECTS)),timetable:JSON.parse(JSON.stringify(DEFAULT_TIMETABLE)),attendance:{},leaves:[],notifications:[{id:1,type:'critical',title:'Physics Low',body:'Physics attendance is critically low. Attend next classes.',time:'Today, 09:00 AM',read:false},{id:2,type:'warning',title:'Chemistry Warning',body:'Chemistry is near the limit. One more absence drops below target.',time:'Today, 08:30 AM',read:false},{id:3,type:'success',title:'Leave Approved',body:'Your leave for 15 March has been approved.',time:'Yesterday',read:true}]};
   seedData(s);return s;
 }
-function saveState(){try{localStorage.setItem('ae_v4',JSON.stringify(S));}catch(e){}saveToCloud();}
+function saveState(){
+  try{localStorage.setItem('ae_v4',JSON.stringify(S));}catch(e){}
+  if(!window._suppressCloudSync) saveToCloud();
+}
 function seedData(s){
   const t=new Date(),y=t.getFullYear(),m=t.getMonth(),day=t.getDate();
   for(let d=1;d<day;d++){
@@ -1322,14 +1334,20 @@ function renderDashboard(){
   const activeSubjects = S.subjects.filter(s => activeIds.has(s.id) || getSubjStats(s.id).held > 0);
 
   const avg=getAvgClassesPerDay();
-  const skipDays=activeSubjects.length>0?Math.floor(Math.min(...activeSubjects.map(s=>{const st=getSubjStats(s.id);return canSkip(st.att,st.held,t);})) / Math.max(1,avg)):0;
-  const mustStayDays=activeSubjects.length>0?Math.max(...activeSubjects.map(s=>{const st=getSubjStats(s.id);return needMore(st.att,st.held,t);})):0;
+  // Use EXACT same formula as Bunk Class "Leave Available"
+  // canSkip on overall total att/held — matches Bunk Class screen perfectly
+  const skipClasses=canSkip(ov.att,ov.held,t);
+  const skipDays=Math.floor(skipClasses/Math.max(1,avg));
+  // mustStayDays = SUM of all subjects need-more
+  const mustStayDays=activeSubjects.reduce((sum,s)=>{const st=getSubjStats(s.id);return sum+needMore(st.att,st.held,t);},0);
+  // Sync: if Bunk Class has been opened, use its exact value
+  const displaySkip = (window._lastDayBunk !== undefined) ? window._lastDayBunk : skipDays;
 
   // Use activeSubjects.length so it correctly says "5 Subjects" instead of 6
   document.getElementById('dash-chips').innerHTML=`
     <div class="chip chip-w">${activeSubjects.length} Subjects</div>
-    <div class="chip" style="background:var(--card2);border:1px solid var(--border);display:inline-flex;gap:6px;align-items:center;">
-      <span style="color:var(--green);font-weight:700;">Skip: ${skipDays}/day</span>
+    <div class="chip" onclick="nav('calc')" style="background:var(--card2);border:1px solid var(--border);display:inline-flex;gap:6px;align-items:center;cursor:pointer;">
+      <span style="color:var(--green);font-weight:700;">Skip: ${displaySkip}/day</span>
       <span style="color:var(--text3);">|</span>
       <span style="color:var(--red);font-weight:700;">Need: ${mustStayDays}/class</span>
     </div>
@@ -1345,6 +1363,38 @@ function renderDashboard(){
     }
   });
   document.getElementById('dash-alerts').innerHTML=alerts;
+  // Auto dismiss alerts after 5 seconds
+  if(alerts){
+    clearTimeout(window._alertDismissTimer);
+    window._alertDismissTimer=setTimeout(()=>{
+      const el=document.getElementById('dash-alerts');
+      if(el){el.style.transition='opacity .5s';el.style.opacity='0';setTimeout(()=>{el.innerHTML='';el.style.opacity='1';},500);}
+    },5000);
+  }
+  // Push warning alerts into Notifications screen so bell icon shows them
+  activeSubjects.forEach(s=>{
+    const st=getSubjStats(s.id);if(st.held===0)return;
+    if(st.pct<t){
+      const n=needMore(st.att,st.held,t);
+      const type=st.pct<t-10?'critical':'warning';
+      const title=`${s.name} Low Attendance`;
+      const body=`${s.name} at ${st.pct}%. Need ${n} more class${n!==1?'es':''} to reach ${t}%.`;
+      // Update existing notification or add new one
+      const ex=S.notifications.find(x=>x.title===title);
+      if(ex){
+        // Update body in case % changed
+        ex.body=body;ex.read=false;ex.time='Just now';ex.type=type;
+      } else {
+        S.notifications.unshift({id:Date.now()+Math.random(),type,title,body,time:'Just now',read:false});
+      }
+    } else {
+      // Subject recovered above target — remove its warning from notifications
+      const idx=S.notifications.findIndex(x=>x.title===`${s.name} Low Attendance`);
+      if(idx>-1) S.notifications.splice(idx,1);
+    }
+  });
+  saveState();
+  renderNotifs();
 
   // Render using activeSubjects instead of S.subjects
   let subHtml='';
@@ -1800,6 +1850,7 @@ function updateCalcResult(){
   const sk = canSkip(att, total, calcTarget);
   const avg = getAvgClassesPerDay();
   const dayBunk = Math.floor(sk / avg);
+  window._lastDayBunk = dayBunk; // store globally so dashboard can sync
   
   // Convert classes needed into days
   const mustAttendDays = Math.ceil(need / avg);
@@ -1951,17 +2002,23 @@ function renderDetailCal(s){
     let cls='cald'+(isT?' cal-t':'');
     if(rec&&rec[s.id]){if(rec[s.id]==='present')cls+=' cal-p';else if(rec[s.id]==='absent')cls+=' cal-a';else cls+=' cal-sk';}
     else cls+=' cal-e';
-    h+=`<div class="${cls}" onclick="calQuickMark('${key}','${s.id}',this)">${d}</div>`;
+    h+=`<div class="${cls}" onclick="calNavToDate('${key}',${d})">${d}</div>`;
   }
   calEl.innerHTML=h;
 }
-function calQuickMark(key,sid,el){
-  if(!S.attendance[key])S.attendance[key]={};
-  const cur=S.attendance[key][sid];
-  if(!cur||cur==='skip'){S.attendance[key][sid]='present';el.className=el.className.replace(/cal-[pae]\w*/g,'')+' cal-p';}
-  else if(cur==='present'){S.attendance[key][sid]='absent';el.className=el.className.replace(/cal-[pae]\w*/g,'')+' cal-a';}
-  else{delete S.attendance[key][sid];el.className=el.className.replace(/cal-[pae]\w*/g,'')+' cal-e';}
-  saveState();syncAll();toast('Updated ✓');
+function calNavToDate(key, d){
+  // Parse the key back to a date object (format: YYYY-MM-DD)
+  const parts = key.split('-');
+  const newDate = new Date(parseInt(parts[0]), parseInt(parts[1])-1, parseInt(parts[2]));
+  // Set markDate to clicked date and re-render mark screen
+  markDate = newDate;
+  renderMark();
+  // Scroll the mark screen to the TOP so user sees timetable for this date
+  const screen = document.getElementById('s-mark');
+  if(screen) screen.scrollTo({top: 0, behavior: 'smooth'});
+  // Highlight the selected date in calendar (visual only, no data change)
+  document.querySelectorAll('#det-cal .cald').forEach(el => el.style.outline = '');
+  toast(`Showing ${d} ${MON_SHORT[newDate.getMonth()]} — tap Present/Absent to mark`);
 }
 
 // ── TIMETABLE ─────────────────────────────────────────
@@ -2170,59 +2227,72 @@ function renderBunkByDay() {
   if(!container) return;
   let html = '';
   const target = calcTarget;
-  const ov = getOverall(); 
-  
-  // THE MAGIC FIX: Get exactly how many classes you can safely skip globally
-  const sk = canSkip(ov.att, ov.held, target); 
-  
+  const ov = getOverall();
+
   [1, 2, 3, 4, 5].forEach(day => {
     const classes = (S.timetable[day] || []).filter(c => !BREAK_IDS.includes(c.subjId));
-    if (classes.length === 0) return; 
-    
-    let periodsSafeToSkip = 0;
-    let riskSubject = "";
-    
-    // NEW LOGIC: Just check if the classes in this day fit inside your overall global skips
-    for (let i = 0; i < classes.length; i++) {
-      if ((i + 1) <= sk) {
-        periodsSafeToSkip = i + 1; // It fits in the buffer!
-      } else {
-        // It exceeded your overall buffer. Mark the subject that broke the limit.
-        const sName = gs(classes[i].subjId) ? gs(classes[i].subjId).name.split(' ')[0] : classes[i].subjId;
-        riskSubject = sName;
-        break; 
-      }
-    }
+    if(classes.length === 0) return;
 
-    const dayDropPct = Math.round((ov.att / (ov.held + classes.length)) * 100);
-    
-    // Color is red if skipping the whole day exceeds your safe skip allowance
-    const impactColor = (classes.length <= sk) ? 'var(--text3)' : 'var(--red)';
-    let impactText = `<div style="font-size:10px; font-weight:700; color:${impactColor}; margin-bottom:5px;">Overall: ${ov.pct}% → ${dayDropPct}%</div>`;
+    // ── FIX 3: UNIQUE DROP % PER DAY ────────────────────
+    // For each subject, add only the classes scheduled TODAY to held
+    // This gives a different result per day because subjects differ per day
+    let simAtt = 0, simHeld = 0;
+    S.subjects.filter(s => !BREAK_IDS.includes(s.id)).forEach(s => {
+      const st = getSubjStats(s.id);
+      // How many times does THIS subject appear today?
+      const skippedToday = classes.filter(c => c.subjId === s.id).length;
+      simAtt  += st.att;                     // attended same — we were absent today
+      simHeld += st.held + skippedToday;     // held increases only by today's classes
+    });
+    const dayDropPct = simHeld > 0 ? Math.round(simAtt / simHeld * 100) : ov.pct;
+
+    // ── FIX 2: CORRECT DANGER/SAFE STATUS ───────────────
+    // For each UNIQUE subject today, check how many safe skips it has
+    // If safeSkips > 0  → subject is fine to skip → contribute to safe count
+    // If safeSkips <= 0 → subject already at limit → Danger
+    const uniqueSubjIds = [...new Set(classes.map(c => c.subjId))];
+    let dangerCount = 0;
+    let riskyCount  = 0;
+    let safeCount   = 0;
+
+    uniqueSubjIds.forEach(sid => {
+      const st = getSubjStats(sid);
+      if(st.held === 0){ safeCount++; return; } // no data yet = assume safe
+      const safeSkips = canSkip(st.att, st.held, target);
+      if(safeSkips <= 0){
+        dangerCount++; // already at or below target — cannot skip even 1
+      } else if(safeSkips <= 2){
+        riskyCount++;  // only 1-2 skips left — cutting close
+      } else {
+        safeCount++;   // plenty of room to skip
+      }
+    });
+
+    // Badge decision:
+    // ✗ Danger        → ANY subject has 0 safe skips (already at limit)
+    // ⚠ Risky (But skip) → no danger subjects, but some subjects are close
+    // ✓ Full Day Skip → all subjects have >2 safe skips remaining
+    const impactColor = dayDropPct >= target ? 'var(--text3)' : 'var(--red)';
+    const impactText = `<div style="font-size:10px;font-weight:700;color:${impactColor};margin-bottom:5px;">Overall: ${ov.pct}% → ${dayDropPct}%</div>`;
 
     let badge = '';
-    
-    if (periodsSafeToSkip === classes.length) {
-      badge = `<span style="background:rgba(0,200,83,.12);color:var(--green);padding:5px 9px;border-radius:8px;font-size:10px;font-weight:800;">✓ Full Day Skip</span>`;
-    } else if (periodsSafeToSkip >= classes.length - 1 && periodsSafeToSkip > 0) {
-      badge = `<span style="background:rgba(255,171,0,.12);color:var(--yellow);padding:5px 9px;border-radius:8px;font-size:10px;font-weight:800;">⚠ Skip first ${periodsSafeToSkip} only</span>`;
-    } else {
-      // Cleaned up to only show "✗ Danger"
+    if(dangerCount > 0){
       badge = `<span style="background:rgba(255,23,68,.12);color:var(--red);padding:5px 9px;border-radius:8px;font-size:10px;font-weight:800;">✗ Danger</span>`;
+    } else if(riskyCount > 0){
+      badge = `<span style="background:rgba(255,171,0,.12);color:var(--yellow);padding:5px 9px;border-radius:8px;font-size:10px;font-weight:800;">⚠ Risky (But skip)</span>`;
+    } else {
+      badge = `<span style="background:rgba(0,200,83,.12);color:var(--green);padding:5px 9px;border-radius:8px;font-size:10px;font-weight:800;">✓ Full Day Skip</span>`;
     }
-      
+
     html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
       <div>
         <div style="font-size:13px;font-weight:800;color:var(--text);">${DAY_NAMES[day]}</div>
         <div style="font-size:10px;color:var(--text3);margin-top:4px;">${classes.length} Classes scheduled</div>
       </div>
-      <div style="text-align:right;">
-        ${impactText}
-        ${badge}
-      </div>
+      <div style="text-align:right;">${impactText}${badge}</div>
     </div>`;
   });
-  
+
   if(html === '') html = `<div style="text-align:center;padding:16px;color:var(--text3);font-size:12px;background:var(--card);border-radius:12px;border:1px solid var(--border);">No active classes in schedule.</div>`;
   container.innerHTML = html;
 }
@@ -2745,8 +2815,14 @@ function saveProfile(){
 // ── NOTIFICATIONS ─────────────────────────────────────
 function renderNotifs(){
   const un=S.notifications.filter(n=>!n.read).length;
-  const badge=document.getElementById('notif-badge');badge.textContent=un;badge.style.display=un?'inline':'none';
-  document.getElementById('ndot').style.display=un?'block':'none';
+  const badge=document.getElementById('notif-badge');
+  if(badge){badge.textContent=un;badge.style.display=un?'inline':'none';}
+  const ndotEl=document.getElementById('ndot');
+  if(ndotEl){
+    ndotEl.style.display=un?'flex':'none';
+    ndotEl.textContent=un>9?'9+':String(un);
+    if(un){ndotEl.classList.remove('pulse');void ndotEl.offsetWidth;ndotEl.classList.add('pulse');}
+  }
   const types={critical:{bg:'rgba(255,23,68,.12)',b:'rgba(255,23,68,.2)',c:'var(--red)'},warning:{bg:'rgba(255,171,0,.12)',b:'rgba(255,171,0,.2)',c:'var(--yellow)'},success:{bg:'rgba(0,200,83,.12)',b:'rgba(0,200,83,.2)',c:'var(--green)'},info:{bg:'var(--purple3)',b:'rgba(108,99,255,.2)',c:'var(--purple)'}};
   if(!S.notifications.length){document.getElementById('notif-list').innerHTML=`<div style="padding:28px;text-align:center;color:var(--text3);font-size:12px;">All caught up! 🎉</div>`;return;}
   let h='';
@@ -3269,8 +3345,20 @@ function recoverData(){
 }
 function hardReset(){
   hapticWarning();
+
+  // FIX: If user is logged in, ask if they want to restore from cloud instead
+  if(currentUser && db){
+    if(confirm('You are signed in to Cloud Sync.\n\nRestore your saved cloud data instead of clearing?\n\nOK = Restore from cloud\nCancel = Clear everything')){
+      loadFromCloud();
+      toast('Restoring from cloud...');
+      closeModal('modal-reset');
+      return;
+    }
+  }
+
+  // FIX: Suppress cloud sync during reset — don't overwrite cloud with blank data!
+  window._suppressCloudSync = true;
   try{localStorage.removeItem('ae_v4');localStorage.removeItem('ae_onboarded');}catch(e){}
-  // Reset in memory — never reload (would re-trigger error screen)
   S={
     profile:{...DEFAULT_PROFILE},
     subjects:JSON.parse(JSON.stringify(DEFAULT_SUBJECTS)),
@@ -3280,7 +3368,8 @@ function hardReset(){
     notifications:[{id:Date.now(),type:'info',title:'Fresh Start 🎉',body:'All data cleared. Add your subjects in Timetable to get started!',time:'Just now',read:false}]
   };
   seedData(S);
-  saveState();
+  saveState(); // saves to localStorage only, NOT to cloud
+  window._suppressCloudSync = false; // re-enable cloud sync
   calcVals={total:0,att:0,fut:20};
   calcTarget=75;
   currentDetailSubj=null;
@@ -3470,4 +3559,5 @@ function getSemesterForecast(){
 }
 </script>
 </body></html>
+
 
